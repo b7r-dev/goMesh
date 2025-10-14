@@ -8,7 +8,7 @@ import (
 	"os"
 	"time"
 
-	pb "github.com/lmatte7/gomesh/github.com/meshtastic/gomeshproto"
+	pb "github.com/b7r-dev/goMesh/github.com/meshtastic/gomeshproto"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -369,9 +369,9 @@ func (r *Radio) SetModemMode(mode string) error {
 func (r *Radio) SetLocation(lat int32, long int32, alt int32) error {
 
 	positionPacket := pb.Position{
-		LatitudeI:  lat,
-		LongitudeI: long,
-		Altitude:   alt,
+		LatitudeI:  &lat,
+		LongitudeI: &long,
+		Altitude:   &alt,
 	}
 
 	out, err := proto.Marshal(&positionPacket)
@@ -412,8 +412,8 @@ func (r *Radio) SetLocation(lat int32, long int32, alt int32) error {
 // Send a factory reset command to the radio
 func (r *Radio) FactoryRest() error {
 	adminPacket := pb.AdminMessage{
-		PayloadVariant: &pb.AdminMessage_FactoryReset{
-			FactoryReset: 1,
+		PayloadVariant: &pb.AdminMessage_FactoryResetDevice{
+			FactoryResetDevice: 1,
 		},
 	}
 	out, err := proto.Marshal(&adminPacket)

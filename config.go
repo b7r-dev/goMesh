@@ -5,7 +5,7 @@ import (
 	"reflect"
 	"strconv"
 
-	pb "github.com/lmatte7/gomesh/github.com/meshtastic/gomeshproto"
+	pb "github.com/b7r-dev/goMesh/github.com/meshtastic/gomeshproto"
 	"google.golang.org/protobuf/proto"
 )
 
