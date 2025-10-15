@@ -196,11 +196,20 @@ func (r *Radio) switchToAPIMode() error {
 	// Some firmware versions may still output debug messages after exit
 	log.Printf("📤 SWITCHING TO API MODE: Sending additional API mode commands...")
 
-	// Try multiple approaches to disable console output
+	// Try multiple approaches to disable console output - be more aggressive
 	commands := []string{
-		"set serial.enabled false\n",
 		"set device.debug_log_enabled false\n",
+		"set device.serial_enabled false\n",
+		"set serial.enabled false\n",
+		"set device.serial_console_enabled false\n",
+		"set console.enabled false\n",
+		"set device.debug_log_api_enabled false\n",
+		"set device.debug_log_radio_enabled false\n",
+		"set device.debug_log_gps_enabled false\n",
+		"set device.debug_log_mesh_enabled false\n",
+		"set device.debug_log_modules_enabled false\n",
 		"exit\n", // Send exit again to be sure
+		"exit\n", // Send exit twice to be extra sure
 	}
 
 	for i, cmd := range commands {
@@ -279,10 +288,7 @@ func (r *Radio) ReadResponseWithTypes(timeout bool) (*RadioResponseSet, error) {
 		err := r.streamer.Read(b)
 		if err == nil {
 			totalBytesRead++
-			// Log every 100 bytes or when we get interesting bytes
-			if totalBytesRead%100 == 0 || b[0] == start1 || b[0] == start2 {
-				log.Printf("📥 BYTE READ #%d: 0x%02x (%d)", totalBytesRead, b[0], b[0])
-			}
+			// Suppress all byte-by-byte logging to reduce noise
 		}
 
 		if bytes.Equal(b, previousByte) {
@@ -310,14 +316,16 @@ func (r *Radio) ReadResponseWithTypes(timeout bool) (*RadioResponseSet, error) {
 				// Process any accumulated text data before starting protobuf parsing
 				if len(textBuffer) > 0 && isTextData(textBuffer) {
 					textLines := extractTextFromBytes(textBuffer)
-					for _, line := range textLines {
-						log.Printf("📝 TEXT DATA: %q", line)
-						responseSet.TextMessages = append(responseSet.TextMessages, line)
-						responseSet.AllResponses = append(responseSet.AllResponses, &RadioResponse{
-							Type:     ResponseTypeText,
-							TextData: line,
-							RawBytes: []byte(line),
-						})
+					if len(textLines) > 0 {
+						// Completely suppress text data logging to reduce noise
+						for _, line := range textLines {
+							responseSet.TextMessages = append(responseSet.TextMessages, line)
+							responseSet.AllResponses = append(responseSet.AllResponses, &RadioResponse{
+								Type:     ResponseTypeText,
+								TextData: line,
+								RawBytes: []byte(line),
+							})
+						}
 					}
 					textBuffer = emptyByte
 				}
@@ -396,7 +404,10 @@ func (r *Radio) ReadResponseWithTypes(timeout bool) (*RadioResponseSet, error) {
 
 				// Reset protobuf processing if we were in the middle of it
 				if len(processedBytes) > 0 {
-					log.Printf("🔍 HEADER: Expected START1 (0x%02x), got 0x%02x - treating as text", start1, b[0])
+					// Only log if we have significant data to avoid spam
+					if len(processedBytes) > 4 {
+						log.Printf("🔍 HEADER: Expected START1, got text data - resetting (%d bytes)", len(processedBytes))
+					}
 					textBuffer = append(textBuffer, processedBytes...)
 					processedBytes = emptyByte
 				}
@@ -410,14 +421,16 @@ func (r *Radio) ReadResponseWithTypes(timeout bool) (*RadioResponseSet, error) {
 	// Process any remaining text data
 	if len(textBuffer) > 0 && isTextData(textBuffer) {
 		textLines := extractTextFromBytes(textBuffer)
-		for _, line := range textLines {
-			log.Printf("📝 FINAL TEXT DATA: %q", line)
-			responseSet.TextMessages = append(responseSet.TextMessages, line)
-			responseSet.AllResponses = append(responseSet.AllResponses, &RadioResponse{
-				Type:     ResponseTypeText,
-				TextData: line,
-				RawBytes: []byte(line),
-			})
+		if len(textLines) > 0 {
+			// Completely suppress final text data logging to reduce noise
+			for _, line := range textLines {
+				responseSet.TextMessages = append(responseSet.TextMessages, line)
+				responseSet.AllResponses = append(responseSet.AllResponses, &RadioResponse{
+					Type:     ResponseTypeText,
+					TextData: line,
+					RawBytes: []byte(line),
+				})
+			}
 		}
 	}
 
@@ -455,10 +468,7 @@ func (r *Radio) ReadResponse(timeout bool) (FromRadioPackets []*pb.FromRadio, er
 		err := r.streamer.Read(b)
 		if err == nil {
 			totalBytesRead++
-			// Log every 100 bytes or when we get interesting bytes
-			if totalBytesRead%100 == 0 || b[0] == start1 || b[0] == start2 {
-				log.Printf("📥 BYTE READ #%d: 0x%02x (%d)", totalBytesRead, b[0], b[0])
-			}
+			// Suppress all byte-by-byte logging to reduce noise
 		}
 
 		if bytes.Equal(b, previousByte) {
@@ -483,7 +493,7 @@ func (r *Radio) ReadResponse(timeout bool) (FromRadioPackets []*pb.FromRadio, er
 
 			if pointer == 0 {
 				if b[0] != start1 {
-					log.Printf("🔍 HEADER: Expected START1 (0x%02x), got 0x%02x - resetting", start1, b[0])
+					// Suppress logging completely for text data to reduce noise
 					processedBytes = emptyByte
 				} else {
 					log.Printf("🔍 HEADER: Found START1 (0x%02x)", b[0])
@@ -893,6 +903,60 @@ func (r *Radio) SetLocation(lat int32, long int32, alt int32) error {
 	}
 
 	packet, err := proto.Marshal(&radioMessage)
+	if err != nil {
+		return err
+	}
+
+	if err := r.sendPacket(packet); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// SetNodeFavorite marks a node as favorite on the radio device
+func (r *Radio) SetNodeFavorite(nodeID uint32) error {
+	adminPacket := pb.AdminMessage{
+		PayloadVariant: &pb.AdminMessage_SetFavoriteNode{
+			SetFavoriteNode: nodeID,
+		},
+	}
+
+	out, err := proto.Marshal(&adminPacket)
+	if err != nil {
+		return err
+	}
+
+	nodeNum := r.nodeNum
+
+	packet, err := r.createAdminPacket(nodeNum, out)
+	if err != nil {
+		return err
+	}
+
+	if err := r.sendPacket(packet); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// RemoveNodeFavorite removes a node from favorites on the radio device
+func (r *Radio) RemoveNodeFavorite(nodeID uint32) error {
+	adminPacket := pb.AdminMessage{
+		PayloadVariant: &pb.AdminMessage_RemoveFavoriteNode{
+			RemoveFavoriteNode: nodeID,
+		},
+	}
+
+	out, err := proto.Marshal(&adminPacket)
+	if err != nil {
+		return err
+	}
+
+	nodeNum := r.nodeNum
+
+	packet, err := r.createAdminPacket(nodeNum, out)
 	if err != nil {
 		return err
 	}
