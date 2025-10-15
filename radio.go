@@ -8,7 +8,9 @@ import (
 	"log"
 	"math/rand"
 	"os"
+	"strings"
 	"time"
+	"unicode"
 
 	pb "github.com/b7r-dev/goMesh/github.com/meshtastic/gomeshproto"
 	"google.golang.org/protobuf/proto"
@@ -54,6 +56,72 @@ const broadcastAddr = "^all"
 const localAddr = "^local"
 const defaultHopLimit = 3
 const broadcastNum = 0xffffffff
+
+// ResponseType indicates the type of data received from the radio
+type ResponseType int
+
+const (
+	ResponseTypeProtobuf ResponseType = iota
+	ResponseTypeText
+	ResponseTypeUnknown
+)
+
+// RadioResponse represents a response from the radio that can be either protobuf or text
+type RadioResponse struct {
+	Type        ResponseType
+	ProtobufMsg *pb.FromRadio
+	TextData    string
+	RawBytes    []byte
+}
+
+// RadioResponseSet contains both protobuf and text responses from a read operation
+type RadioResponseSet struct {
+	ProtobufPackets []*pb.FromRadio
+	TextMessages    []string
+	AllResponses    []*RadioResponse
+}
+
+// isTextData determines if the given bytes represent text data
+func isTextData(data []byte) bool {
+	if len(data) == 0 {
+		return false
+	}
+
+	// Check if data contains mostly printable ASCII characters
+	printableCount := 0
+	for _, b := range data {
+		if unicode.IsPrint(rune(b)) || b == '\n' || b == '\r' || b == '\t' {
+			printableCount++
+		}
+	}
+
+	// Consider it text if more than 80% of characters are printable
+	return float64(printableCount)/float64(len(data)) > 0.8
+}
+
+// extractTextFromBytes extracts text data from a byte buffer, handling common text patterns
+func extractTextFromBytes(data []byte) []string {
+	if len(data) == 0 {
+		return nil
+	}
+
+	// Convert to string and split by common line endings
+	text := string(data)
+	text = strings.ReplaceAll(text, "\r\n", "\n")
+	text = strings.ReplaceAll(text, "\r", "\n")
+
+	lines := strings.Split(text, "\n")
+	var validLines []string
+
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if len(line) > 0 {
+			validLines = append(validLines, line)
+		}
+	}
+
+	return validLines
+}
 
 // Radio holds the port and serial io.ReadWriteCloser struct to maintain one serial connection
 type Radio struct {
@@ -124,6 +192,41 @@ func (r *Radio) switchToAPIMode() error {
 		time.Sleep(50 * time.Millisecond)
 	}
 
+	// Send additional commands to ensure we're fully in API mode
+	// Some firmware versions may still output debug messages after exit
+	log.Printf("📤 SWITCHING TO API MODE: Sending additional API mode commands...")
+
+	// Try multiple approaches to disable console output
+	commands := []string{
+		"set serial.enabled false\n",
+		"set device.debug_log_enabled false\n",
+		"exit\n", // Send exit again to be sure
+	}
+
+	for i, cmd := range commands {
+		log.Printf("📤 SWITCHING TO API MODE: Sending command %d: %q", i+1, strings.TrimSpace(cmd))
+		err = r.streamer.Write([]byte(cmd))
+		if err != nil {
+			log.Printf("⚠️ SWITCHING TO API MODE: Failed to send command %d: %v", i+1, err)
+		} else {
+			// Wait a bit for each command to take effect
+			time.Sleep(200 * time.Millisecond)
+
+			// Clear any response from the command
+			for j := 0; j < 3; j++ {
+				b := make([]byte, 512)
+				err := r.streamer.Read(b)
+				if err != nil {
+					break
+				}
+				if len(b) > 0 {
+					log.Printf("🧹 CLEARED COMMAND %d RESPONSE: %q", i+1, string(b[:min(50, len(b))]))
+				}
+				time.Sleep(50 * time.Millisecond)
+			}
+		}
+	}
+
 	log.Printf("✅ SWITCHING TO API MODE: Mode switch complete")
 	return nil
 }
@@ -152,6 +255,181 @@ func (r *Radio) sendPacket(protobufPacket []byte) (err error) {
 	log.Printf("✅ PACKET SENT SUCCESSFULLY")
 	return
 
+}
+
+// ReadResponseWithTypes reads responses from the serial port and returns both text and protobuf data
+func (r *Radio) ReadResponseWithTypes(timeout bool) (*RadioResponseSet, error) {
+	log.Printf("📥 READRESPONSE_ENHANCED: Starting to read radio response (timeout=%v)", timeout)
+
+	b := make([]byte, 1)
+	emptyByte := make([]byte, 0)
+	processedBytes := make([]byte, 0)
+	textBuffer := make([]byte, 0)
+	repeatByteCounter := 0
+	previousByte := make([]byte, 1)
+	totalBytesRead := 0
+
+	responseSet := &RadioResponseSet{
+		ProtobufPackets: make([]*pb.FromRadio, 0),
+		TextMessages:    make([]string, 0),
+		AllResponses:    make([]*RadioResponse, 0),
+	}
+
+	for {
+		err := r.streamer.Read(b)
+		if err == nil {
+			totalBytesRead++
+			// Log every 100 bytes or when we get interesting bytes
+			if totalBytesRead%100 == 0 || b[0] == start1 || b[0] == start2 {
+				log.Printf("📥 BYTE READ #%d: 0x%02x (%d)", totalBytesRead, b[0], b[0])
+			}
+		}
+
+		if bytes.Equal(b, previousByte) {
+			repeatByteCounter++
+		} else {
+			repeatByteCounter = 0
+		}
+
+		if err == io.EOF || repeatByteCounter > 20 || errors.Is(err, os.ErrDeadlineExceeded) {
+			log.Printf("📥 READRESPONSE_ENHANCED: Breaking loop - EOF=%v, RepeatCount=%d, Timeout=%v, TotalBytes=%d",
+				err == io.EOF, repeatByteCounter, errors.Is(err, os.ErrDeadlineExceeded), totalBytesRead)
+			break
+		} else if err != nil {
+			log.Printf("❌ READRESPONSE_ENHANCED: Read error: %v", err)
+			return nil, err
+		}
+		copy(previousByte, b)
+
+		if len(b) > 0 {
+			// Try to detect if we're in a protobuf packet sequence
+			pointer := len(processedBytes)
+
+			// Check if this byte could be the start of a protobuf packet
+			if pointer == 0 && b[0] == start1 {
+				// Process any accumulated text data before starting protobuf parsing
+				if len(textBuffer) > 0 && isTextData(textBuffer) {
+					textLines := extractTextFromBytes(textBuffer)
+					for _, line := range textLines {
+						log.Printf("📝 TEXT DATA: %q", line)
+						responseSet.TextMessages = append(responseSet.TextMessages, line)
+						responseSet.AllResponses = append(responseSet.AllResponses, &RadioResponse{
+							Type:     ResponseTypeText,
+							TextData: line,
+							RawBytes: []byte(line),
+						})
+					}
+					textBuffer = emptyByte
+				}
+
+				// Start protobuf packet processing
+				processedBytes = append(processedBytes, b...)
+				log.Printf("🔍 HEADER: Found START1 (0x%02x)", b[0])
+			} else if pointer == 1 && b[0] == start2 {
+				// Continue protobuf packet processing
+				processedBytes = append(processedBytes, b...)
+				log.Printf("🔍 HEADER: Found START2 (0x%02x)", b[0])
+			} else if pointer > 0 && pointer < headerLen {
+				// Continue building protobuf header
+				processedBytes = append(processedBytes, b...)
+			} else if pointer >= headerLen {
+				// We're in protobuf payload processing
+				processedBytes = append(processedBytes, b...)
+
+				packetLength := int((processedBytes[2] << 8) + processedBytes[3])
+				if pointer == headerLen {
+					log.Printf("🔍 PACKET LENGTH: Calculated length=%d (bytes 2-3: 0x%02x 0x%02x)",
+						packetLength, processedBytes[2], processedBytes[3])
+					if packetLength > maxToFromRadioSzie {
+						log.Printf("❌ PACKET TOO LARGE: %d > %d - resetting", packetLength, maxToFromRadioSzie)
+						processedBytes = emptyByte
+						textBuffer = append(textBuffer, b...)
+						continue
+					}
+				}
+
+				if len(processedBytes) != 0 && pointer+1 == packetLength+headerLen {
+					// Complete protobuf packet received
+					fromRadio := pb.FromRadio{}
+					payloadBytes := processedBytes[headerLen:]
+
+					log.Printf("🔍 PARSING PROTOBUF: TotalLen=%d, HeaderLen=%d, PayloadLen=%d, ExpectedLen=%d",
+						len(processedBytes), headerLen, len(payloadBytes), packetLength)
+
+					if len(payloadBytes) == 0 {
+						log.Printf("⚠️  EMPTY PAYLOAD: Skipping empty protobuf payload")
+						processedBytes = emptyByte
+						continue
+					}
+
+					if len(payloadBytes) != packetLength {
+						log.Printf("⚠️  LENGTH MISMATCH: Expected %d bytes, got %d bytes", packetLength, len(payloadBytes))
+						processedBytes = emptyByte
+						continue
+					}
+
+					if err := proto.Unmarshal(payloadBytes, &fromRadio); err != nil {
+						log.Printf("❌ PROTOBUF PARSE ERROR: %v", err)
+						log.Printf("❌ FAILED PAYLOAD (len=%d): %x", len(payloadBytes), payloadBytes)
+
+						// Treat as text data instead
+						textBuffer = append(textBuffer, processedBytes...)
+						processedBytes = emptyByte
+						continue
+					}
+
+					log.Printf("✅ PROTOBUF PARSED: Type=%T, PayloadVariant=%T", &fromRadio, fromRadio.PayloadVariant)
+
+					responseSet.ProtobufPackets = append(responseSet.ProtobufPackets, &fromRadio)
+					responseSet.AllResponses = append(responseSet.AllResponses, &RadioResponse{
+						Type:        ResponseTypeProtobuf,
+						ProtobufMsg: &fromRadio,
+						RawBytes:    make([]byte, len(processedBytes)),
+					})
+					copy(responseSet.AllResponses[len(responseSet.AllResponses)-1].RawBytes, processedBytes)
+
+					processedBytes = emptyByte
+				}
+			} else {
+				// Not in protobuf sequence, accumulate as potential text data
+				textBuffer = append(textBuffer, b...)
+
+				// Reset protobuf processing if we were in the middle of it
+				if len(processedBytes) > 0 {
+					log.Printf("🔍 HEADER: Expected START1 (0x%02x), got 0x%02x - treating as text", start1, b[0])
+					textBuffer = append(textBuffer, processedBytes...)
+					processedBytes = emptyByte
+				}
+			}
+		} else {
+			log.Printf("📥 READRESPONSE_ENHANCED: Empty byte received, breaking")
+			break
+		}
+	}
+
+	// Process any remaining text data
+	if len(textBuffer) > 0 && isTextData(textBuffer) {
+		textLines := extractTextFromBytes(textBuffer)
+		for _, line := range textLines {
+			log.Printf("📝 FINAL TEXT DATA: %q", line)
+			responseSet.TextMessages = append(responseSet.TextMessages, line)
+			responseSet.AllResponses = append(responseSet.AllResponses, &RadioResponse{
+				Type:     ResponseTypeText,
+				TextData: line,
+				RawBytes: []byte(line),
+			})
+		}
+	}
+
+	log.Printf("📥 READRESPONSE_ENHANCED: Completed - Found %d protobuf packets, %d text messages, TotalBytesRead=%d",
+		len(responseSet.ProtobufPackets), len(responseSet.TextMessages), totalBytesRead)
+
+	if len(processedBytes) > 0 {
+		log.Printf("⚠️  READRESPONSE_ENHANCED: %d unprocessed protobuf bytes remaining: %x",
+			len(processedBytes), processedBytes)
+	}
+
+	return responseSet, nil
 }
 
 // ReadResponse reads any responses in the serial port, convert them to a FromRadio protobuf and return
@@ -287,6 +565,24 @@ func (r *Radio) ReadResponse(timeout bool) (FromRadioPackets []*pb.FromRadio, er
 
 	return FromRadioPackets, nil
 
+}
+
+// ReadTextResponse reads text responses from the serial port, filtering out protobuf data
+func (r *Radio) ReadTextResponse(timeout bool) ([]string, error) {
+	responseSet, err := r.ReadResponseWithTypes(timeout)
+	if err != nil {
+		return nil, err
+	}
+	return responseSet.TextMessages, nil
+}
+
+// ReadProtobufResponse reads protobuf responses from the serial port, filtering out text data
+func (r *Radio) ReadProtobufResponse(timeout bool) ([]*pb.FromRadio, error) {
+	responseSet, err := r.ReadResponseWithTypes(timeout)
+	if err != nil {
+		return nil, err
+	}
+	return responseSet.ProtobufPackets, nil
 }
 
 // createAdminPacket builds a admin message packet to send to the radio
