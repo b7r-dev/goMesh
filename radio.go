@@ -170,14 +170,7 @@ func extractTextFromBytes(data []byte) []string {
 	// Remove other common control characters but keep printable ones
 	text = cleanControlCharacters(text)
 
-	// Log cleanup if significant changes were made
-	if len(originalText) > 0 && originalText != text {
-		log.Printf("🧹 TEXT CLEANUP: Cleaned %d chars -> %d chars", len(originalText), len(text))
-		if len(originalText) < 100 {
-			log.Printf("🧹 BEFORE: %q", originalText)
-			log.Printf("🧹 AFTER:  %q", text)
-		}
-	}
+	// Text cleanup completed silently
 
 	lines := strings.Split(text, "\n")
 	var validLines []string
@@ -292,7 +285,6 @@ func (r *Radio) switchToAPIMode() error {
 	time.Sleep(500 * time.Millisecond)
 
 	// Clear any remaining console output from the buffer
-	log.Printf("🧹 SWITCHING TO API MODE: Clearing console buffer...")
 	for i := 0; i < 10; i++ {
 		b := make([]byte, 1024)
 		err := r.streamer.Read(b)
@@ -300,17 +292,11 @@ func (r *Radio) switchToAPIMode() error {
 			// If we get a timeout or EOF, that's expected - buffer is clear
 			break
 		}
-		// Log what we're clearing (for debugging)
-		if len(b) > 0 {
-			log.Printf("🧹 CLEARED CONSOLE DATA: %q", string(b[:min(100, len(b))]))
-		}
 		time.Sleep(50 * time.Millisecond)
 	}
 
 	// Send additional commands to ensure we're fully in API mode
 	// Some firmware versions may still output debug messages after exit
-	log.Printf("📤 SWITCHING TO API MODE: Sending additional API mode commands...")
-
 	// Try multiple approaches to disable console output - be more aggressive
 	commands := []string{
 		"set device.debug_log_enabled false\n",
@@ -327,12 +313,9 @@ func (r *Radio) switchToAPIMode() error {
 		"exit\n", // Send exit twice to be extra sure
 	}
 
-	for i, cmd := range commands {
-		log.Printf("📤 SWITCHING TO API MODE: Sending command %d: %q", i+1, strings.TrimSpace(cmd))
+	for _, cmd := range commands {
 		err = r.streamer.Write([]byte(cmd))
-		if err != nil {
-			log.Printf("⚠️ SWITCHING TO API MODE: Failed to send command %d: %v", i+1, err)
-		} else {
+		if err == nil {
 			// Wait a bit for each command to take effect
 			time.Sleep(200 * time.Millisecond)
 
@@ -343,15 +326,10 @@ func (r *Radio) switchToAPIMode() error {
 				if err != nil {
 					break
 				}
-				if len(b) > 0 {
-					log.Printf("🧹 CLEARED COMMAND %d RESPONSE: %q", i+1, string(b[:min(50, len(b))]))
-				}
 				time.Sleep(50 * time.Millisecond)
 			}
 		}
 	}
-
-	log.Printf("✅ SWITCHING TO API MODE: Mode switch complete")
 	return nil
 }
 
@@ -364,11 +342,7 @@ func (r *Radio) sendPacket(protobufPacket []byte) (err error) {
 
 	radioPacket := append(header, protobufPacket...)
 
-	// Add debugging for packet sending
-	log.Printf("📤 SENDING PACKET: ProtobufLen=%d, HeaderLen=%d, TotalLen=%d",
-		len(protobufPacket), len(header), len(radioPacket))
-	log.Printf("📤 PACKET HEADER: %x", header)
-	log.Printf("📤 PROTOBUF DATA (first 32 bytes): %x", protobufPacket[:min(32, len(protobufPacket))])
+	// Send packet to radio
 
 	err = r.streamer.Write(radioPacket)
 	if err != nil {
@@ -905,10 +879,8 @@ func (r *Radio) GetRadioInfo() (radioResponses []*pb.FromRadio, err error) {
 		return nil, err
 	}
 
-	log.Printf("📤 GETRADIOINFO: Sending WantConfigId request (42), payload size: %d", len(out))
 	err = r.sendPacket(out)
 	if err != nil {
-		log.Printf("❌ GETRADIOINFO: Failed to send WantConfigId packet: %v", err)
 		return nil, err
 	}
 
