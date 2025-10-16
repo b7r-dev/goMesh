@@ -17,6 +17,53 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
+// LogLevel controls the verbosity of debug logging
+type LogLevel int
+
+const (
+	LogLevelSilent LogLevel = iota // No debug logs
+	LogLevelError                  // Only errors
+	LogLevelWarn                   // Errors and warnings
+	LogLevelInfo                   // Errors, warnings, and info
+	LogLevelDebug                  // All logs including debug
+)
+
+// globalLogLevel controls verbosity of all gomesh logging
+var globalLogLevel = LogLevelInfo
+
+// SetLogLevel sets the global log level for gomesh
+func SetLogLevel(level LogLevel) {
+	globalLogLevel = level
+}
+
+// debugLog logs a message if the log level is Debug or higher
+func debugLog(format string, v ...interface{}) {
+	if globalLogLevel >= LogLevelDebug {
+		log.Printf(format, v...)
+	}
+}
+
+// infoLog logs a message if the log level is Info or higher
+func infoLog(format string, v ...interface{}) {
+	if globalLogLevel >= LogLevelInfo {
+		log.Printf(format, v...)
+	}
+}
+
+// warnLog logs a message if the log level is Warn or higher
+func warnLog(format string, v ...interface{}) {
+	if globalLogLevel >= LogLevelWarn {
+		log.Printf(format, v...)
+	}
+}
+
+// errorLog logs a message if the log level is Error or higher
+func errorLog(format string, v ...interface{}) {
+	if globalLogLevel >= LogLevelError {
+		log.Printf(format, v...)
+	}
+}
+
 // min returns the smaller of two integers
 func min(a, b int) int {
 	if a < b {
@@ -248,13 +295,13 @@ func (r *Radio) Init(port string) error {
 	r.streamer = streamer
 
 	// Switch radio from console mode to API mode
-	log.Printf("🔄 RADIO INIT: Switching to API mode...")
+	infoLog("🔄 RADIO INIT: Switching to API mode...")
 	err = r.switchToAPIMode()
 	if err != nil {
-		log.Printf("❌ RADIO INIT: Failed to switch to API mode: %v", err)
+		errorLog("❌ RADIO INIT: Failed to switch to API mode: %v", err)
 		return err
 	}
-	log.Printf("✅ RADIO INIT: Successfully switched to API mode")
+	infoLog("✅ RADIO INIT: Successfully switched to API mode")
 
 	err = r.getNodeNum()
 	if err != nil {
@@ -271,7 +318,7 @@ func (r *Radio) GetNodeID() uint32 {
 
 // switchToAPIMode switches the radio from console mode to API (protobuf) mode
 func (r *Radio) switchToAPIMode() error {
-	log.Printf("📤 SWITCHING TO API MODE: Sending exit command...")
+	infoLog("📤 SWITCHING TO API MODE: Sending exit command...")
 
 	// Send "exit" command to exit console mode and switch to API mode
 	// This is the standard way to switch Meshtastic radios from console to API mode
@@ -346,18 +393,18 @@ func (r *Radio) sendPacket(protobufPacket []byte) (err error) {
 
 	err = r.streamer.Write(radioPacket)
 	if err != nil {
-		log.Printf("❌ PACKET SEND FAILED: %v", err)
+		errorLog("❌ PACKET SEND FAILED: %v", err)
 		return err
 	}
 
-	log.Printf("✅ PACKET SENT SUCCESSFULLY")
+	debugLog("✅ PACKET SENT SUCCESSFULLY")
 	return
 
 }
 
 // ReadResponseWithTypes reads responses from the serial port and returns both text and protobuf data
 func (r *Radio) ReadResponseWithTypes(timeout bool) (*RadioResponseSet, error) {
-	log.Printf("📥 READRESPONSE_ENHANCED: Starting to read radio response (timeout=%v)", timeout)
+	infoLog("📥 READRESPONSE_ENHANCED: Starting to read radio response (timeout=%v)", timeout)
 
 	b := make([]byte, 1)
 	emptyByte := make([]byte, 0)
@@ -387,11 +434,11 @@ func (r *Radio) ReadResponseWithTypes(timeout bool) (*RadioResponseSet, error) {
 		}
 
 		if err == io.EOF || repeatByteCounter > 20 || errors.Is(err, os.ErrDeadlineExceeded) {
-			log.Printf("📥 READRESPONSE_ENHANCED: Breaking loop - EOF=%v, RepeatCount=%d, Timeout=%v, TotalBytes=%d",
+			debugLog("📥 READRESPONSE_ENHANCED: Breaking loop - EOF=%v, RepeatCount=%d, Timeout=%v, TotalBytes=%d",
 				err == io.EOF, repeatByteCounter, errors.Is(err, os.ErrDeadlineExceeded), totalBytesRead)
 			break
 		} else if err != nil {
-			log.Printf("❌ READRESPONSE_ENHANCED: Read error: %v", err)
+			errorLog("❌ READRESPONSE_ENHANCED: Read error: %v", err)
 			return nil, err
 		}
 		copy(previousByte, b)
@@ -421,11 +468,11 @@ func (r *Radio) ReadResponseWithTypes(timeout bool) (*RadioResponseSet, error) {
 
 				// Start protobuf packet processing
 				processedBytes = append(processedBytes, b...)
-				log.Printf("🔍 HEADER: Found START1 (0x%02x)", b[0])
+				debugLog("🔍 HEADER: Found START1 (0x%02x)", b[0])
 			} else if pointer == 1 && b[0] == start2 {
 				// Continue protobuf packet processing
 				processedBytes = append(processedBytes, b...)
-				log.Printf("🔍 HEADER: Found START2 (0x%02x)", b[0])
+				debugLog("🔍 HEADER: Found START2 (0x%02x)", b[0])
 			} else if pointer > 0 && pointer < headerLen {
 				// Continue building protobuf header
 				processedBytes = append(processedBytes, b...)
@@ -435,10 +482,10 @@ func (r *Radio) ReadResponseWithTypes(timeout bool) (*RadioResponseSet, error) {
 
 				packetLength := int((processedBytes[2] << 8) + processedBytes[3])
 				if pointer == headerLen {
-					log.Printf("🔍 PACKET LENGTH: Calculated length=%d (bytes 2-3: 0x%02x 0x%02x)",
+					debugLog("🔍 PACKET LENGTH: Calculated length=%d (bytes 2-3: 0x%02x 0x%02x)",
 						packetLength, processedBytes[2], processedBytes[3])
 					if packetLength > maxToFromRadioSzie {
-						log.Printf("❌ PACKET TOO LARGE: %d > %d - resetting", packetLength, maxToFromRadioSzie)
+						errorLog("❌ PACKET TOO LARGE: %d > %d - resetting", packetLength, maxToFromRadioSzie)
 						processedBytes = emptyByte
 						textBuffer = append(textBuffer, b...)
 						continue
@@ -446,7 +493,7 @@ func (r *Radio) ReadResponseWithTypes(timeout bool) (*RadioResponseSet, error) {
 
 					// Check if this might be a false packet header (debug output that accidentally looks like a header)
 					if len(processedBytes) >= 8 && isLikelyFalsePacketHeader(processedBytes) {
-						log.Printf("🔍 FALSE HEADER DETECTED: Treating as text data")
+						debugLog("🔍 FALSE HEADER DETECTED: Treating as text data")
 						textBuffer = append(textBuffer, processedBytes...)
 						processedBytes = emptyByte
 						continue
@@ -457,17 +504,17 @@ func (r *Radio) ReadResponseWithTypes(timeout bool) (*RadioResponseSet, error) {
 					// Complete protobuf packet received
 					payloadBytes := processedBytes[headerLen:]
 
-					log.Printf("🔍 PARSING PROTOBUF: TotalLen=%d, HeaderLen=%d, PayloadLen=%d, ExpectedLen=%d",
+					debugLog("🔍 PARSING PROTOBUF: TotalLen=%d, HeaderLen=%d, PayloadLen=%d, ExpectedLen=%d",
 						len(processedBytes), headerLen, len(payloadBytes), packetLength)
 
 					if len(payloadBytes) == 0 {
-						log.Printf("⚠️  EMPTY PAYLOAD: Skipping empty protobuf payload")
+						warnLog("⚠️  EMPTY PAYLOAD: Skipping empty protobuf payload")
 						processedBytes = emptyByte
 						continue
 					}
 
 					if len(payloadBytes) != packetLength {
-						log.Printf("⚠️  LENGTH MISMATCH: Expected %d bytes, got %d bytes", packetLength, len(payloadBytes))
+						warnLog("⚠️  LENGTH MISMATCH: Expected %d bytes, got %d bytes", packetLength, len(payloadBytes))
 						processedBytes = emptyByte
 						continue
 					}
@@ -476,13 +523,13 @@ func (r *Radio) ReadResponseWithTypes(timeout bool) (*RadioResponseSet, error) {
 					fromRadio := pb.FromRadio{}
 					if err := proto.Unmarshal(payloadBytes, &fromRadio); err != nil {
 						// Protobuf parsing failed - treat as text data
-						log.Printf("🔍 PROTOBUF DECODE FAILED: Treating as text data (len=%d)", len(payloadBytes))
+						debugLog("🔍 PROTOBUF DECODE FAILED: Treating as text data (len=%d)", len(payloadBytes))
 						textBuffer = append(textBuffer, processedBytes...)
 						processedBytes = emptyByte
 						continue
 					}
 
-					log.Printf("✅ PROTOBUF DECODED: Type=%T, PayloadVariant=%T", &fromRadio, fromRadio.PayloadVariant)
+					debugLog("✅ PROTOBUF DECODED: Type=%T, PayloadVariant=%T", &fromRadio, fromRadio.PayloadVariant)
 
 					responseSet.ProtobufPackets = append(responseSet.ProtobufPackets, &fromRadio)
 					responseSet.AllResponses = append(responseSet.AllResponses, &RadioResponse{
@@ -502,14 +549,14 @@ func (r *Radio) ReadResponseWithTypes(timeout bool) (*RadioResponseSet, error) {
 				if len(processedBytes) > 0 {
 					// Only log if we have significant data to avoid spam
 					if len(processedBytes) > 4 {
-						log.Printf("🔍 HEADER: Expected START1, got text data - resetting (%d bytes)", len(processedBytes))
+						debugLog("🔍 HEADER: Expected START1, got text data - resetting (%d bytes)", len(processedBytes))
 					}
 					textBuffer = append(textBuffer, processedBytes...)
 					processedBytes = emptyByte
 				}
 			}
 		} else {
-			log.Printf("📥 READRESPONSE_ENHANCED: Empty byte received, breaking")
+			debugLog("📥 READRESPONSE_ENHANCED: Empty byte received, breaking")
 			break
 		}
 	}
@@ -530,11 +577,11 @@ func (r *Radio) ReadResponseWithTypes(timeout bool) (*RadioResponseSet, error) {
 		}
 	}
 
-	log.Printf("📥 READRESPONSE_ENHANCED: Completed - Found %d protobuf packets, %d text messages, TotalBytesRead=%d",
+	infoLog("📥 READRESPONSE_ENHANCED: Completed - Found %d protobuf packets, %d text messages, TotalBytesRead=%d",
 		len(responseSet.ProtobufPackets), len(responseSet.TextMessages), totalBytesRead)
 
 	if len(processedBytes) > 0 {
-		log.Printf("⚠️  READRESPONSE_ENHANCED: %d unprocessed protobuf bytes remaining: %x",
+		warnLog("⚠️  READRESPONSE_ENHANCED: %d unprocessed protobuf bytes remaining: %x",
 			len(processedBytes), processedBytes)
 	}
 
@@ -543,7 +590,7 @@ func (r *Radio) ReadResponseWithTypes(timeout bool) (*RadioResponseSet, error) {
 
 // ReadResponse reads any responses in the serial port, convert them to a FromRadio protobuf and return
 func (r *Radio) ReadResponse(timeout bool) (FromRadioPackets []*pb.FromRadio, err error) {
-	log.Printf("📥 READRESPONSE: Starting to read radio response (timeout=%v)", timeout)
+	infoLog("📥 READRESPONSE: Starting to read radio response (timeout=%v)", timeout)
 
 	b := make([]byte, 1)
 	emptyByte := make([]byte, 0)
@@ -574,11 +621,11 @@ func (r *Radio) ReadResponse(timeout bool) (FromRadioPackets []*pb.FromRadio, er
 		}
 
 		if err == io.EOF || repeatByteCounter > 20 || errors.Is(err, os.ErrDeadlineExceeded) {
-			log.Printf("📥 READRESPONSE: Breaking loop - EOF=%v, RepeatCount=%d, Timeout=%v, TotalBytes=%d",
+			debugLog("📥 READRESPONSE: Breaking loop - EOF=%v, RepeatCount=%d, Timeout=%v, TotalBytes=%d",
 				err == io.EOF, repeatByteCounter, errors.Is(err, os.ErrDeadlineExceeded), totalBytesRead)
 			break
 		} else if err != nil {
-			log.Printf("❌ READRESPONSE: Read error: %v", err)
+			errorLog("❌ READRESPONSE: Read error: %v", err)
 			return nil, err
 		}
 		copy(previousByte, b)
@@ -592,23 +639,23 @@ func (r *Radio) ReadResponse(timeout bool) (FromRadioPackets []*pb.FromRadio, er
 					// Suppress logging completely for text data to reduce noise
 					processedBytes = emptyByte
 				} else {
-					log.Printf("🔍 HEADER: Found START1 (0x%02x)", b[0])
+					debugLog("🔍 HEADER: Found START1 (0x%02x)", b[0])
 				}
 			} else if pointer == 1 {
 				if b[0] != start2 {
-					log.Printf("🔍 HEADER: Expected START2 (0x%02x), got 0x%02x - resetting", start2, b[0])
+					debugLog("🔍 HEADER: Expected START2 (0x%02x), got 0x%02x - resetting", start2, b[0])
 					processedBytes = emptyByte
 				} else {
-					log.Printf("🔍 HEADER: Found START2 (0x%02x)", b[0])
+					debugLog("🔍 HEADER: Found START2 (0x%02x)", b[0])
 				}
 			} else if pointer >= headerLen {
 				packetLength := int((processedBytes[2] << 8) + processedBytes[3])
 
 				if pointer == headerLen {
-					log.Printf("🔍 PACKET LENGTH: Calculated length=%d (bytes 2-3: 0x%02x 0x%02x)",
+					debugLog("🔍 PACKET LENGTH: Calculated length=%d (bytes 2-3: 0x%02x 0x%02x)",
 						packetLength, processedBytes[2], processedBytes[3])
 					if packetLength > maxToFromRadioSzie {
-						log.Printf("❌ PACKET TOO LARGE: %d > %d - resetting", packetLength, maxToFromRadioSzie)
+						errorLog("❌ PACKET TOO LARGE: %d > %d - resetting", packetLength, maxToFromRadioSzie)
 						processedBytes = emptyByte
 					}
 				}
@@ -616,18 +663,18 @@ func (r *Radio) ReadResponse(timeout bool) (FromRadioPackets []*pb.FromRadio, er
 				if len(processedBytes) != 0 && pointer+1 == packetLength+headerLen {
 					payloadBytes := processedBytes[headerLen:]
 
-					log.Printf("🔍 PARSING PROTOBUF: TotalLen=%d, HeaderLen=%d, PayloadLen=%d, ExpectedLen=%d",
+					debugLog("🔍 PARSING PROTOBUF: TotalLen=%d, HeaderLen=%d, PayloadLen=%d, ExpectedLen=%d",
 						len(processedBytes), headerLen, len(payloadBytes), packetLength)
 
 					// Validate payload before attempting to parse
 					if len(payloadBytes) == 0 {
-						log.Printf("⚠️  EMPTY PAYLOAD: Skipping empty protobuf payload")
+						warnLog("⚠️  EMPTY PAYLOAD: Skipping empty protobuf payload")
 						processedBytes = emptyByte
 						continue
 					}
 
 					if len(payloadBytes) != packetLength {
-						log.Printf("⚠️  LENGTH MISMATCH: Expected %d bytes, got %d bytes", packetLength, len(payloadBytes))
+						warnLog("⚠️  LENGTH MISMATCH: Expected %d bytes, got %d bytes", packetLength, len(payloadBytes))
 						processedBytes = emptyByte
 						continue
 					}
@@ -636,12 +683,12 @@ func (r *Radio) ReadResponse(timeout bool) (FromRadioPackets []*pb.FromRadio, er
 					fromRadio := pb.FromRadio{}
 					if err := proto.Unmarshal(payloadBytes, &fromRadio); err != nil {
 						// Protobuf parsing failed - skip this data (ReadResponse only returns protobuf packets)
-						log.Printf("🔍 PROTOBUF DECODE FAILED: Skipping non-protobuf data (len=%d)", len(payloadBytes))
+						debugLog("🔍 PROTOBUF DECODE FAILED: Skipping non-protobuf data (len=%d)", len(payloadBytes))
 						processedBytes = emptyByte
 						continue
 					}
 
-					log.Printf("✅ PROTOBUF DECODED: Type=%T, PayloadVariant=%T",
+					debugLog("✅ PROTOBUF DECODED: Type=%T, PayloadVariant=%T",
 						&fromRadio, fromRadio.PayloadVariant)
 
 					FromRadioPackets = append(FromRadioPackets, &fromRadio)
@@ -650,17 +697,17 @@ func (r *Radio) ReadResponse(timeout bool) (FromRadioPackets []*pb.FromRadio, er
 			}
 
 		} else {
-			log.Printf("📥 READRESPONSE: Empty byte received, breaking")
+			debugLog("📥 READRESPONSE: Empty byte received, breaking")
 			break
 		}
 
 	}
 
-	log.Printf("📥 READRESPONSE: Completed - Found %d packets, TotalBytesRead=%d",
+	infoLog("📥 READRESPONSE: Completed - Found %d packets, TotalBytesRead=%d",
 		len(FromRadioPackets), totalBytesRead)
 
 	if len(processedBytes) > 0 {
-		log.Printf("⚠️  READRESPONSE: %d unprocessed bytes remaining: %x",
+		warnLog("⚠️  READRESPONSE: %d unprocessed bytes remaining: %x",
 			len(processedBytes), processedBytes)
 	}
 
@@ -670,7 +717,7 @@ func (r *Radio) ReadResponse(timeout bool) (FromRadioPackets []*pb.FromRadio, er
 
 // ReadResponseBatch reads responses from the serial port with a maximum count limit
 func (r *Radio) ReadResponseBatch(timeout bool, maxResponses int) (FromRadioPackets []*pb.FromRadio, err error) {
-	log.Printf("📥 READRESPONSE_BATCH: Starting to read radio response (timeout=%v, maxResponses=%d)", timeout, maxResponses)
+	infoLog("📥 READRESPONSE_BATCH: Starting to read radio response (timeout=%v, maxResponses=%d)", timeout, maxResponses)
 
 	b := make([]byte, 1)
 	emptyByte := make([]byte, 0)
@@ -693,11 +740,11 @@ func (r *Radio) ReadResponseBatch(timeout bool, maxResponses int) (FromRadioPack
 		}
 
 		if err == io.EOF || repeatByteCounter > 20 || errors.Is(err, os.ErrDeadlineExceeded) {
-			log.Printf("📥 READRESPONSE_BATCH: Breaking loop - EOF=%v, RepeatCount=%d, Timeout=%v, TotalBytes=%d, Responses=%d",
+			debugLog("📥 READRESPONSE_BATCH: Breaking loop - EOF=%v, RepeatCount=%d, Timeout=%v, TotalBytes=%d, Responses=%d",
 				err == io.EOF, repeatByteCounter, errors.Is(err, os.ErrDeadlineExceeded), totalBytesRead, responseCount)
 			break
 		} else if err != nil {
-			log.Printf("❌ READRESPONSE_BATCH: Read error: %v", err)
+			errorLog("❌ READRESPONSE_BATCH: Read error: %v", err)
 			return nil, err
 		}
 		copy(previousByte, b)
@@ -711,14 +758,14 @@ func (r *Radio) ReadResponseBatch(timeout bool, maxResponses int) (FromRadioPack
 					// Suppress logging completely for text data to reduce noise
 					processedBytes = emptyByte
 				} else {
-					log.Printf("🔍 HEADER: Found START1 (0x%02x)", b[0])
+					debugLog("🔍 HEADER: Found START1 (0x%02x)", b[0])
 				}
 			} else if pointer == 1 {
 				if b[0] != start2 {
-					log.Printf("⚠️  HEADER: Expected START2 (0x%02x) but got (0x%02x), resetting", start2, b[0])
+					warnLog("⚠️  HEADER: Expected START2 (0x%02x) but got (0x%02x), resetting", start2, b[0])
 					processedBytes = emptyByte
 				} else {
-					log.Printf("🔍 HEADER: Found START2 (0x%02x)", b[0])
+					debugLog("🔍 HEADER: Found START2 (0x%02x)", b[0])
 				}
 			} else if pointer == 2 || pointer == 3 {
 				// Length bytes - continue collecting
@@ -730,23 +777,23 @@ func (r *Radio) ReadResponseBatch(timeout bool, maxResponses int) (FromRadioPack
 
 					if len(processedBytes) >= totalExpectedLength {
 						// We have a complete packet
-						log.Printf("🔍 PACKET LENGTH: Calculated length=%d (bytes 2-3: 0x%02x 0x%02x)",
+						debugLog("🔍 PACKET LENGTH: Calculated length=%d (bytes 2-3: 0x%02x 0x%02x)",
 							packetLength, processedBytes[2], processedBytes[3])
 
 						payloadBytes := processedBytes[4:totalExpectedLength]
 
-						log.Printf("🔍 PARSING PROTOBUF: TotalLen=%d, HeaderLen=4, PayloadLen=%d, ExpectedLen=%d",
+						debugLog("🔍 PARSING PROTOBUF: TotalLen=%d, HeaderLen=4, PayloadLen=%d, ExpectedLen=%d",
 							len(processedBytes), len(payloadBytes), packetLength)
 
 						// Try to decode as protobuf first - if it fails, skip (this function only returns protobuf)
 						var fromRadio pb.FromRadio
 						if err := proto.Unmarshal(payloadBytes, &fromRadio); err != nil {
-							log.Printf("🔍 PROTOBUF DECODE FAILED: Skipping non-protobuf data (len=%d)", len(payloadBytes))
+							debugLog("🔍 PROTOBUF DECODE FAILED: Skipping non-protobuf data (len=%d)", len(payloadBytes))
 							processedBytes = emptyByte
 							continue
 						}
 
-						log.Printf("✅ PROTOBUF DECODED: Type=%T, PayloadVariant=%T", &fromRadio, fromRadio.PayloadVariant)
+						debugLog("✅ PROTOBUF DECODED: Type=%T, PayloadVariant=%T", &fromRadio, fromRadio.PayloadVariant)
 						FromRadioPackets = append(FromRadioPackets, &fromRadio)
 						responseCount++
 
@@ -759,7 +806,7 @@ func (r *Radio) ReadResponseBatch(timeout bool, maxResponses int) (FromRadioPack
 
 						// Check if we've reached our limit
 						if responseCount >= maxResponses {
-							log.Printf("📥 READRESPONSE_BATCH: Reached max responses limit (%d), stopping", maxResponses)
+							infoLog("📥 READRESPONSE_BATCH: Reached max responses limit (%d), stopping", maxResponses)
 							break
 						}
 					}
@@ -767,16 +814,16 @@ func (r *Radio) ReadResponseBatch(timeout bool, maxResponses int) (FromRadioPack
 			}
 
 		} else {
-			log.Printf("📥 READRESPONSE_BATCH: Empty byte received, breaking")
+			debugLog("📥 READRESPONSE_BATCH: Empty byte received, breaking")
 			break
 		}
 	}
 
-	log.Printf("📥 READRESPONSE_BATCH: Completed - Found %d packets, TotalBytesRead=%d",
+	infoLog("📥 READRESPONSE_BATCH: Completed - Found %d packets, TotalBytesRead=%d",
 		len(FromRadioPackets), totalBytesRead)
 
 	if len(processedBytes) > 0 {
-		log.Printf("⚠️  READRESPONSE_BATCH: %d unprocessed bytes remaining: %x",
+		warnLog("⚠️  READRESPONSE_BATCH: %d unprocessed bytes remaining: %x",
 			len(processedBytes), processedBytes)
 	}
 
@@ -853,13 +900,13 @@ func (r *Radio) getNodeNum() (err error) {
 		if info, ok := response.GetPayloadVariant().(*pb.FromRadio_MyInfo); ok {
 			nodeNum = info.MyInfo.MyNodeNum
 			myInfoCount++
-			log.Printf("🎯 FOUND MyInfo PACKET: NodeNum=%d (!%x)", nodeNum, nodeNum)
+			infoLog("🎯 FOUND MyInfo PACKET: NodeNum=%d (!%x)", nodeNum, nodeNum)
 		}
 	}
 
-	log.Printf("📊 NODE ID DETECTION: Found %d MyInfo packets out of %d total responses", myInfoCount, len(radioResponses))
+	infoLog("📊 NODE ID DETECTION: Found %d MyInfo packets out of %d total responses", myInfoCount, len(radioResponses))
 	if nodeNum == 0 {
-		log.Printf("⚠️  NO MyInfo PACKET FOUND - Node ID will be 0")
+		warnLog("⚠️  NO MyInfo PACKET FOUND - Node ID will be 0")
 	}
 
 	r.nodeNum = nodeNum
@@ -868,14 +915,14 @@ func (r *Radio) getNodeNum() (err error) {
 
 // GetRadioInfo retrieves information from the radio including config and adjacent Node information
 func (r *Radio) GetRadioInfo() (radioResponses []*pb.FromRadio, err error) {
-	log.Printf("🔄 GETRADIOINFO: Starting radio info request")
+	infoLog("🔄 GETRADIOINFO: Starting radio info request")
 
 	// Send first request for Radio and Node information
 	nodeInfo := pb.ToRadio{PayloadVariant: &pb.ToRadio_WantConfigId{WantConfigId: 42}}
 
 	out, err := proto.Marshal(&nodeInfo)
 	if err != nil {
-		log.Printf("❌ GETRADIOINFO: Failed to marshal WantConfigId: %v", err)
+		errorLog("❌ GETRADIOINFO: Failed to marshal WantConfigId: %v", err)
 		return nil, err
 	}
 
@@ -886,38 +933,38 @@ func (r *Radio) GetRadioInfo() (radioResponses []*pb.FromRadio, err error) {
 
 	checks := 0
 
-	log.Printf("📥 GETRADIOINFO: Reading initial response...")
+	infoLog("📥 GETRADIOINFO: Reading initial response...")
 	radioResponses, err = r.ReadResponse(true)
 
 	if err != nil {
-		log.Printf("❌ GETRADIOINFO: Initial ReadResponse failed: %v", err)
+		errorLog("❌ GETRADIOINFO: Initial ReadResponse failed: %v", err)
 		return nil, err
 	}
 
-	log.Printf("📊 GETRADIOINFO: Initial response count: %d", len(radioResponses))
+	infoLog("📊 GETRADIOINFO: Initial response count: %d", len(radioResponses))
 	for i, resp := range radioResponses {
-		log.Printf("📊 GETRADIOINFO: Response #%d: Type=%T, PayloadVariant=%T",
+		debugLog("📊 GETRADIOINFO: Response #%d: Type=%T, PayloadVariant=%T",
 			i, resp, resp.PayloadVariant)
 	}
 
 	for checks < 5 && len(radioResponses) == 0 {
-		log.Printf("🔄 GETRADIOINFO: Retry %d/5 - no responses yet", checks+1)
+		infoLog("🔄 GETRADIOINFO: Retry %d/5 - no responses yet", checks+1)
 
 		// Add a small delay before retry to let radio process
 		time.Sleep(500 * time.Millisecond)
 
 		radioResponses, err = r.ReadResponse(true)
 		if err != nil {
-			log.Printf("❌ GETRADIOINFO: ReadResponse retry %d failed: %v", checks+1, err)
+			errorLog("❌ GETRADIOINFO: ReadResponse retry %d failed: %v", checks+1, err)
 			// Don't return immediately - try a few more times
 			checks++
 			time.Sleep(1 * time.Second)
 			continue
 		}
 
-		log.Printf("📊 GETRADIOINFO: Retry %d response count: %d", checks+1, len(radioResponses))
+		infoLog("📊 GETRADIOINFO: Retry %d response count: %d", checks+1, len(radioResponses))
 		for i, resp := range radioResponses {
-			log.Printf("📊 GETRADIOINFO: Retry %d Response #%d: Type=%T, PayloadVariant=%T",
+			debugLog("📊 GETRADIOINFO: Retry %d Response #%d: Type=%T, PayloadVariant=%T",
 				checks+1, i, resp, resp.PayloadVariant)
 		}
 
@@ -928,11 +975,11 @@ func (r *Radio) GetRadioInfo() (radioResponses []*pb.FromRadio, err error) {
 	}
 
 	if len(radioResponses) == 0 {
-		log.Printf("❌ GETRADIOINFO: No responses after %d retries", checks)
+		errorLog("❌ GETRADIOINFO: No responses after %d retries", checks)
 		return nil, errors.New("failed to get radio info after multiple retries")
 	}
 
-	log.Printf("✅ GETRADIOINFO: Success! Got %d responses after %d attempts", len(radioResponses), checks+1)
+	infoLog("✅ GETRADIOINFO: Success! Got %d responses after %d attempts", len(radioResponses), checks+1)
 	return
 
 }
@@ -1120,7 +1167,7 @@ func (r *Radio) SetLocation(lat int32, long int32, alt int32) error {
 
 // SetNodeFavorite marks a node as favorite on the radio device
 func (r *Radio) SetNodeFavorite(nodeID uint32) error {
-	log.Printf("🌟 GOMESH: SetNodeFavorite called for node %d (!%x)", nodeID, nodeID)
+	infoLog("🌟 GOMESH: SetNodeFavorite called for node %d (!%x)", nodeID, nodeID)
 
 	adminPacket := pb.AdminMessage{
 		PayloadVariant: &pb.AdminMessage_SetFavoriteNode{
@@ -1130,35 +1177,35 @@ func (r *Radio) SetNodeFavorite(nodeID uint32) error {
 
 	out, err := proto.Marshal(&adminPacket)
 	if err != nil {
-		log.Printf("❌ GOMESH: Failed to marshal admin packet: %v", err)
+		errorLog("❌ GOMESH: Failed to marshal admin packet: %v", err)
 		return err
 	}
 
-	log.Printf("✅ GOMESH: Admin packet marshaled successfully, size: %d bytes", len(out))
+	debugLog("✅ GOMESH: Admin packet marshaled successfully, size: %d bytes", len(out))
 
 	nodeNum := r.nodeNum
-	log.Printf("🔍 GOMESH: Using nodeNum %d for admin packet", nodeNum)
+	debugLog("🔍 GOMESH: Using nodeNum %d for admin packet", nodeNum)
 
 	packet, err := r.createAdminPacket(nodeNum, out)
 	if err != nil {
-		log.Printf("❌ GOMESH: Failed to create admin packet: %v", err)
+		errorLog("❌ GOMESH: Failed to create admin packet: %v", err)
 		return err
 	}
 
-	log.Printf("✅ GOMESH: Admin packet created successfully, size: %d bytes", len(packet))
+	debugLog("✅ GOMESH: Admin packet created successfully, size: %d bytes", len(packet))
 
 	if err := r.sendPacket(packet); err != nil {
-		log.Printf("❌ GOMESH: Failed to send packet: %v", err)
+		errorLog("❌ GOMESH: Failed to send packet: %v", err)
 		return err
 	}
 
-	log.Printf("✅ GOMESH: SetNodeFavorite packet sent successfully for node %d", nodeID)
+	infoLog("✅ GOMESH: SetNodeFavorite packet sent successfully for node %d", nodeID)
 	return nil
 }
 
 // RemoveNodeFavorite removes a node from favorites on the radio device
 func (r *Radio) RemoveNodeFavorite(nodeID uint32) error {
-	log.Printf("🌟 GOMESH: RemoveNodeFavorite called for node %d (!%x)", nodeID, nodeID)
+	infoLog("🌟 GOMESH: RemoveNodeFavorite called for node %d (!%x)", nodeID, nodeID)
 
 	adminPacket := pb.AdminMessage{
 		PayloadVariant: &pb.AdminMessage_RemoveFavoriteNode{
@@ -1168,29 +1215,29 @@ func (r *Radio) RemoveNodeFavorite(nodeID uint32) error {
 
 	out, err := proto.Marshal(&adminPacket)
 	if err != nil {
-		log.Printf("❌ GOMESH: Failed to marshal admin packet: %v", err)
+		errorLog("❌ GOMESH: Failed to marshal admin packet: %v", err)
 		return err
 	}
 
-	log.Printf("✅ GOMESH: Admin packet marshaled successfully, size: %d bytes", len(out))
+	debugLog("✅ GOMESH: Admin packet marshaled successfully, size: %d bytes", len(out))
 
 	nodeNum := r.nodeNum
-	log.Printf("🔍 GOMESH: Using nodeNum %d for admin packet", nodeNum)
+	debugLog("🔍 GOMESH: Using nodeNum %d for admin packet", nodeNum)
 
 	packet, err := r.createAdminPacket(nodeNum, out)
 	if err != nil {
-		log.Printf("❌ GOMESH: Failed to create admin packet: %v", err)
+		errorLog("❌ GOMESH: Failed to create admin packet: %v", err)
 		return err
 	}
 
-	log.Printf("✅ GOMESH: Admin packet created successfully, size: %d bytes", len(packet))
+	debugLog("✅ GOMESH: Admin packet created successfully, size: %d bytes", len(packet))
 
 	if err := r.sendPacket(packet); err != nil {
-		log.Printf("❌ GOMESH: Failed to send packet: %v", err)
+		errorLog("❌ GOMESH: Failed to send packet: %v", err)
 		return err
 	}
 
-	log.Printf("✅ GOMESH: RemoveNodeFavorite packet sent successfully for node %d", nodeID)
+	infoLog("✅ GOMESH: RemoveNodeFavorite packet sent successfully for node %d", nodeID)
 	return nil
 }
 
